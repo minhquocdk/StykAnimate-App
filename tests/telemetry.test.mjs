@@ -45,7 +45,7 @@ test('strict payload sanitization, finite histogram counts and redacted error co
   const h = emptyHistogram(); [1, 4, 12, 90].forEach(n => observe(h, n)); assert.equal(percentile(h, .5), 4); assert.equal(percentile(h, .95), 90);
 });
 test('uploads are cumulative, bounded and throttled; sequence survives opt-out and restart', async () => {
-  let now = Date.now(); const { service, directory, requests } = await fixture({ now: () => now });
+  let now = Date.parse('2026-01-15T12:00:00Z'); const { service, directory, requests } = await fixture({ now: () => now });
   await service.setConsent(consent); service.count('open', 2); await service.upload(); await service.upload(); assert.equal(requests.length, 1);
   const first = JSON.parse(requests[0].body); assert.equal(first.counters.open, 2);
   const oldEpoch = service.epoch; await service.setConsent({ analytics: false, diagnostics: false });
@@ -68,7 +68,7 @@ test('delete removes local data, queues an offline request, survives restart and
   assert.equal(JSON.parse(await readFile(path.join(directory, 'telemetry-state.json'), 'utf8')).deletions.length, 0);
 });
 test('unchanged and idle-only reports do not use hosting requests; new activity carries deferred idle time', async () => {
-  let now = Date.now(); const { service, requests } = await fixture({ now: () => now });
+  let now = Date.parse('2026-01-15T12:00:00Z'); const { service, requests } = await fixture({ now: () => now });
   await service.setConsent(consent); await service.upload();
   const sequence = service.preview().snapshots[0].sequence;
   assert.equal(service.record({ epoch: service.epoch, data: {} }), false);
@@ -102,7 +102,7 @@ test('local checkpoints persist only when telemetry state changed', async () => 
   assert.equal(service.unsaved, false);
 });
 test('first-observed milestones survive longer than the offline queue', async () => {
-  let now = Date.now(); const { service, directory } = await fixture({ now: () => now });
+  let now = Date.parse('2026-01-15T12:00:00Z'); const { service, directory } = await fixture({ now: () => now });
   await service.setConsent(consent); service.milestone('first_save');
   const firstSave = service.preview().snapshots[0].milestones.first_save; await service.close();
   now += 10 * 86400000;
