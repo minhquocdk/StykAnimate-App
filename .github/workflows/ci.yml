@@ -54,6 +54,10 @@ jobs:
     uses: ./.github/workflows/web-verify.yml
 
   linux-app:
+    # Fork-only development: skip the heavy packaging job outside the upstream
+    # repository. Re-enable by removing this condition when this fork needs to
+    # build its own releases.
+    if: github.repository_owner == 'filippocalippo'
     # Builds the Linux app from source exactly as a release would, then boots it.
     name: Linux app
     runs-on: ubuntu-latest
