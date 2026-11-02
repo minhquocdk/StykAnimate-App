@@ -51,6 +51,10 @@ jobs:
         run: python -m unittest discover -s backend -p "test_*.py"
 
   web:
+    # Fork-only development: the browser build jobs are heavy, need browser
+    # downloads, and are unrelated to the headless engine/MCP work here. Re-enable
+    # by removing this condition when this fork needs to verify web changes.
+    if: github.repository_owner == 'filippocalippo'
     uses: ./.github/workflows/web-verify.yml
 
   linux-app:
