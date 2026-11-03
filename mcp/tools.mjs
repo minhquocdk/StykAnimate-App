@@ -12,6 +12,7 @@ import { mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { resolvePython } from '../scripts/run-python.mjs';
+import { easingMode, validateKeyEasing } from '../src/keyframe-easing.mjs';
 import { Editor } from '../src/editor.mjs';
 import { defaultFigure, emptyDocument, createFrame, createObject } from '../src/demo.mjs';
 
@@ -89,6 +90,7 @@ function sceneReport(session) {
     frames: doc.keyframes.map((frame, frameIndex) => ({
       index: frameIndex,
       duration_raw: frame.duration_raw,
+      easing: frame._styk?.easing ? { interpolation: easingMode(frame._styk.easing), ...(frame._styk.easing.bezier ? { bezier: frame._styk.easing.bezier } : {}) } : null,
       objects: frame.objects.map((object) => ({
         unique_id: object.unique_id,
         figure_type_id: object.figure_type_id,
@@ -270,6 +272,26 @@ async function saveProject(session, args) {
   }
 }
 
+async function setFrameEasing(session, args) {
+  const { editor } = session;
+  if (args.frame_index !== undefined) editor.selectFrame(args.frame_index);
+  const index = editor.frameIndex;
+  const interpolation = args.interpolation === 'hold' ? 'constant' : args.interpolation;
+  const easing = { interpolation };
+  if (interpolation === 'bezier') easing.bezier = args.bezier ?? [0.42, 0, 0.58, 1];
+  validateKeyEasing(easing);
+  const changed = editor.transaction('Set keyframe easing', (frame) => {
+    frame._styk = { ...frame._styk, easing };
+  });
+  return {
+    ok: true,
+    frame_index: index,
+    interpolation: easingMode(easing),
+    ...(easing.bezier ? { bezier: easing.bezier } : {}),
+    changed: changed !== false,
+  };
+}
+
 const defineTool = (name, description, schema, handler) => ({ name, description, schema, handler });
 
 const tools = [
@@ -305,6 +327,12 @@ const tools = [
     session_id: z.string(),
     destination: z.string().describe('Relative path from the repo root (e.g. out/anim.styk); must stay inside the workspace'),
   }), async (args) => saveProject(requireSession(args.session_id), args)),
+  defineTool('set_frame_easing', 'Set the easing curve of a keyframe (the timing between this and the next frame): auto, linear, constant (hold), ease-in, ease-out, or bezier (with optional four control points). One undo group.', z.object({
+    session_id: z.string(),
+    frame_index: z.number().int().min(0).optional().describe('Frame to set (defaults to the current frame)'),
+    interpolation: z.enum(['auto', 'linear', 'constant', 'hold', 'ease-in', 'ease-out', 'bezier']),
+    bezier: z.array(z.number().min(0).max(1)).length(4).optional().describe('Cubic bezier control points [x1,y1,x2,y2] (required only for bezier)'),
+  }), async (args) => setFrameEasing(requireSession(args.session_id), args)),
   defineTool('run_command', 'Escape hatch for arbitrary editor commands. Disabled by default; refuses to run unless STYK_MCP_ALLOW_RUN_COMMAND=1 is set.', z.object({ session_id: z.string(), command: z.string(), args: z.array(z.unknown()).optional() }), async (args) => runCommand(requireSession(args.session_id), args)),
 ];
 

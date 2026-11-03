@@ -53,7 +53,7 @@ test('registers the v0.1 tool set', async () => {
     const names = tools.map((t) => t.name).sort();
     assert.deepEqual(names, [
       'keyframe_duplicate', 'pose_joint', 'project_new', 'redo', 'render_frame', 'run_command', 'save_project',
-      'scene_report', 'serialize_project', 'session_create', 'session_destroy', 'undo',
+      'scene_report', 'serialize_project', 'session_create', 'session_destroy', 'set_frame_easing', 'undo',
     ]);
   });
 });
@@ -214,6 +214,40 @@ test('save_project writes a real .styk through the Python codec', async (t) => {
     // Guard: wrong extension is refused.
     const badExt = await callSafe(client, 'save_project', { session_id: sid, destination: 'artifacts/preview/test.txt' });
     assert.ok(badExt.threw || badExt.result?.isError, 'non-.styk destination is refused');
+
+    await callText(client, 'session_destroy', { session_id: sid });
+  });
+});
+
+test('set_frame_easing controls keyframe timing and is undoable', async () => {
+  await withClient(async (client) => {
+    const sid = (await callText(client, 'session_create', {})).data.session_id;
+    await callText(client, 'project_new', { session_id: sid });
+
+    let report = (await callText(client, 'scene_report', { session_id: sid })).data;
+    assert.equal(report.frames[0].easing, null, 'starter frame has no easing until set');
+
+    let r = (await callText(client, 'set_frame_easing', { session_id: sid, interpolation: 'linear' })).data;
+    assert.equal(r.ok, true);
+    assert.equal(r.interpolation, 'linear');
+    assert.equal(r.changed, true);
+    report = (await callText(client, 'scene_report', { session_id: sid })).data;
+    assert.equal(report.frames[0].easing.interpolation, 'linear');
+
+    r = (await callText(client, 'set_frame_easing', { session_id: sid, interpolation: 'bezier', bezier: [0.2, 0, 0.8, 1] })).data;
+    assert.equal(r.interpolation, 'bezier');
+    assert.deepEqual(r.bezier, [0.2, 0, 0.8, 1]);
+    report = (await callText(client, 'scene_report', { session_id: sid })).data;
+    assert.equal(report.frames[0].easing.interpolation, 'bezier');
+    assert.deepEqual(report.frames[0].easing.bezier, [0.2, 0, 0.8, 1]);
+
+    const bad = await callSafe(client, 'set_frame_easing', { session_id: sid, interpolation: 'bezier', bezier: [2, 0, 0, 1] });
+    assert.ok(bad.threw || bad.result?.isError, 'bezier control points outside 0..1 are refused');
+
+    const undone = (await callText(client, 'undo', { session_id: sid })).data;
+    assert.equal(undone.applied, true);
+    report = (await callText(client, 'scene_report', { session_id: sid })).data;
+    assert.equal(report.frames[0].easing.interpolation, 'linear', 'undo reverts the bezier change');
 
     await callText(client, 'session_destroy', { session_id: sid });
   });
