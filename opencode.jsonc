@@ -1,0 +1,15 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  // StykAnimate MCP server (Phase 2): cho phép AI tạo/chỉnh sửa animation headless qua engine thật.
+  "mcp": {
+    "servers": {
+      "stykanimate": {
+        "type": "local",
+        "command": ["node", "mcp/server.mjs"]
+      }
+    }
+  },
+  "permissions": [
+    { "action": "stykanimate_*", "resource": "*", "effect": "allow" }
+  ]
+}
