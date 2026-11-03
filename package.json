@@ -27,6 +27,7 @@
     "test:localization:browser": "node tests/localization-settings.browser.mjs && node tests/localization-app.browser.mjs && node tests/localization-native-app.browser.mjs && node tests/localization-foundation.browser.mjs && node tests/localization-packs.browser.mjs",
     "test": "node --test tests/*.test.mjs",
     "test:hotkeys": "node --test tests/hotkeys.test.mjs",
+    "test:mcp": "node --test tests/mcp-server.test.mjs",
     "test:hotkeys:ui": "node tests/hotkeys-timeline.browser.mjs",
     "test:hotkeys:desktop": "node scripts/smoke-hotkeys.mjs",
     "test:drawing:desktop": "node scripts/smoke-drawing.mjs",
@@ -97,11 +98,13 @@
     "electron-updater": "6.6.2"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "electron": "39.8.10",
     "electron-builder": "26.15.3",
     "playwright": "1.63.0",
     "pyodide": "314.0.7",
-    "ws": "8.22.0"
+    "ws": "8.22.0",
+    "zod": "^4.6.7"
   },
   "build": {
     "beforePack": "scripts/before-pack.cjs",
