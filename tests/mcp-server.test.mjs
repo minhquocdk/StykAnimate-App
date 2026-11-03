@@ -53,7 +53,7 @@ test('registers the v0.1 tool set', async () => {
     const names = tools.map((t) => t.name).sort();
     assert.deepEqual(names, [
       'add_anticipation', 'keyframe_duplicate', 'motion_path_set', 'pose_joint', 'project_new', 'redo', 'render_animation', 'render_frame', 'run_command', 'save_project',
-      'scene_report', 'serialize_project', 'session_create', 'session_destroy', 'set_frame_easing', 'undo',
+      'scene_report', 'serialize_project', 'session_create', 'session_destroy', 'set_frame_duration', 'set_frame_easing', 'undo',
     ]);
   });
 });
@@ -352,6 +352,34 @@ test('add_anticipation winds up opposite to the action (translation and joint)',
 
     const badTick = await callSafe(client, 'add_anticipation', { session_id: sid, uid: 1, action_tick: 0 });
     assert.ok(badTick.threw || badTick.result?.isError, 'action_tick must leave room for anticipation');
+
+    await callText(client, 'session_destroy', { session_id: sid });
+  });
+});
+
+test('set_frame_duration holds frames and motion_path_set accepts frame_index', async () => {
+  await withClient(async (client) => {
+    const sid = (await callText(client, 'session_create', {})).data.session_id;
+    await callText(client, 'project_new', { session_id: sid });
+
+    let r = (await callText(client, 'set_frame_duration', { session_id: sid, frame_index: 0, ticks: 10 })).data;
+    assert.equal(r.ok, true);
+    assert.equal(r.ticks, 10);
+    assert.equal(r.changed, true);
+    let report = (await callText(client, 'scene_report', { session_id: sid })).data;
+    assert.equal(report.frames[0].duration_raw, 10);
+
+    await callText(client, 'keyframe_duplicate', { session_id: sid });
+    await callText(client, 'set_frame_duration', { session_id: sid, frame_index: 1, ticks: 4 });
+    r = (await callText(client, 'motion_path_set', { session_id: sid, uid: 1, frame_index: 1, x: 540, y: 280 })).data;
+    assert.equal(r.changed, true);
+    assert.equal(r.tick, 10, 'frame 1 starts at tick 10');
+    report = (await callText(client, 'scene_report', { session_id: sid })).data;
+    assert.equal(report.frames[1].objects[0].root_x, 540);
+
+    await callText(client, 'undo', { session_id: sid });
+    report = (await callText(client, 'scene_report', { session_id: sid })).data;
+    assert.equal(report.frames[1].objects[0].root_x, 480, 'undo reverts the motion-path edit');
 
     await callText(client, 'session_destroy', { session_id: sid });
   });

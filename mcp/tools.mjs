@@ -359,6 +359,13 @@ async function motionPathSet(session, args) {
   const object = holder.objects.find((o) => o.unique_id === args.uid);
   const figure = editor.report.figure_types.find((f) => f.figure_type_id === object.figure_type_id);
   if (!figure) throw new Error(`figure type ${object.figure_type_id} not found`);
+  let tick = args.tick;
+  if (tick === undefined) {
+    if (args.frame_index === undefined) throw new Error('provide tick or frame_index');
+    editor.selectFrame(args.frame_index);
+    tick = editor.timeline[editor.frameIndex]?.start;
+    if (tick === undefined) throw new Error('frame has no timeline entry');
+  }
   let target;
   if (args.joint_index != null) {
     if (!Number.isInteger(args.joint_index) || args.joint_index < 0 || args.joint_index >= figure.segments.length) {
@@ -369,7 +376,7 @@ async function motionPathSet(session, args) {
   } else {
     target = { kind: 'node', uid: args.uid, handleId: 0 }; // translate the whole connected component
   }
-  if (!editor.beginMotionPathEdit(target, args.tick)) {
+  if (!editor.beginMotionPathEdit(target, tick)) {
     throw new Error('begin motion path failed (tick outside timeline or invalid target)');
   }
   try {
@@ -378,7 +385,7 @@ async function motionPathSet(session, args) {
     return {
       ok: true,
       uid: args.uid,
-      tick: args.tick,
+      tick,
       x: args.x,
       y: args.y,
       joint_index: args.joint_index ?? null,
@@ -391,6 +398,18 @@ async function motionPathSet(session, args) {
     editor.cancelMotionPathEdit();
     throw error;
   }
+}
+
+function setFrameDuration(session, args) {
+  const { editor } = session;
+  if (args.frame_index !== undefined) editor.selectFrame(args.frame_index);
+  const index = editor.frameIndex;
+  const ticks = Math.trunc(args.ticks);
+  if (!(ticks >= 1 && ticks <= 1000000)) throw new Error(`ticks out of range: ${args.ticks}`);
+  const changed = editor.transaction('Set keyframe duration', (frame) => {
+    frame.duration_raw = ticks;
+  });
+  return { ok: true, frame_index: index, ticks, changed: changed !== false };
 }
 
 /** Anticipation: insert/rewrite the pose `lead` ticks before an action so it
@@ -483,11 +502,17 @@ const tools = [
   defineTool('motion_path_set', 'Move an object (translation) or pose one of its joints at a specific timeline tick, rewriting that point of its motion path. One undo group. Omit joint_index to translate the whole connected component.', z.object({
     session_id: z.string(),
     uid: z.number().int().positive().describe('unique_id of the object to move'),
-    tick: z.number().int().min(0).describe('Timeline tick whose motion-path point to rewrite (0-based)'),
+    tick: z.number().int().min(0).optional().describe('Timeline tick whose motion-path point to rewrite (0-based)'),
+    frame_index: z.number().int().min(0).optional().describe('Alternative to tick: rewrite the pose at the start of this frame'),
     x: z.number().describe('Destination x in document coordinates'),
     y: z.number().describe('Destination y in document coordinates'),
     joint_index: z.number().int().min(0).optional().describe('Segment index to pose instead of translating the object root'),
   }), async (args) => motionPathSet(requireSession(args.session_id), args)),
+  defineTool('set_frame_duration', 'Set a keyframe hold duration in ticks (frames at the project fps). One undo group.', z.object({
+    session_id: z.string(),
+    frame_index: z.number().int().min(0).optional().describe('Frame to change (defaults to the current frame)'),
+    ticks: z.number().int().min(1).describe('Hold length in ticks'),
+  }), async (args) => setFrameDuration(requireSession(args.session_id), args)),
   defineTool('undo', 'Undo the previous editor command.', z.object({ session_id: z.string() }), async (args) => undo(requireSession(args.session_id))),
   defineTool('redo', 'Redo the last undone editor command.', z.object({ session_id: z.string() }), async (args) => redo(requireSession(args.session_id))),
   defineTool('serialize_project', 'Return the full serialized project document.', z.object({ session_id: z.string() }), async (args) => serializeProject(requireSession(args.session_id))),
