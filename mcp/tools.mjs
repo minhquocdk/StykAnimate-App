@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { resolvePython } from '../scripts/run-python.mjs';
 import { easingMode, validateKeyEasing } from '../src/keyframe-easing.mjs';
+import { shortest } from '../src/pivot/geometry.mjs';
 import { Editor } from '../src/editor.mjs';
 import { defaultFigure, emptyDocument, createFrame, createObject } from '../src/demo.mjs';
 
@@ -392,6 +393,62 @@ async function motionPathSet(session, args) {
   }
 }
 
+/** Anticipation: insert/rewrite the pose `lead` ticks before an action so it
+ *  first moves opposite to the action delta (wind-up). One undo group. */
+async function addAnticipation(session, args) {
+  const { editor } = session;
+  const holder = editor.report.keyframes.find((f) => f.objects.some((o) => o.unique_id === args.uid));
+  if (!holder) throw new Error(`no object with unique_id ${args.uid}`);
+  const object = holder.objects.find((o) => o.unique_id === args.uid);
+  const figure = editor.report.figure_types.find((f) => f.figure_type_id === object.figure_type_id);
+  const lead = Number(args.lead ?? 1);
+  if (!Number.isInteger(lead) || lead < 1) throw new Error('lead must be a positive integer');
+  const amount = Number(args.amount ?? 0.5);
+  if (!Number.isFinite(amount) || amount < 0 || amount > 2) throw new Error('amount must be within 0..2');
+  const actionTick = args.action_tick;
+  const prevTick = actionTick - lead;
+  const total = editor.totalTicks;
+  if (actionTick < 0 || prevTick < 0 || actionTick >= total || prevTick >= total) {
+    throw new Error(`tick(s) outside timeline 0..${total - 1}`);
+  }
+  editor.seek(actionTick);
+  const actionObj = editor.frame.objects.find((o) => o.unique_id === args.uid);
+  if (!actionObj) throw new Error(`object ${args.uid} missing on action tick`);
+  const base = { ok: true, uid: args.uid, action_tick: actionTick, anticipation_tick: prevTick, amount, lead };
+  if (args.joint_index != null) {
+    if (!Number.isInteger(args.joint_index) || args.joint_index < 0 || args.joint_index >= figure.segments.length) {
+      throw new Error(`joint_index ${args.joint_index} out of range 0..${figure.segments.length - 1}`);
+    }
+    const A = actionObj.angles[args.joint_index];
+    editor.seek(prevTick);
+    const prevObj = editor.frame.objects.find((o) => o.unique_id === args.uid);
+    if (!prevObj) throw new Error(`object ${args.uid} missing on anticipation tick`);
+    const P = prevObj.angles[args.joint_index];
+    const segment = figure.segments[args.joint_index];
+    const target = P - shortest(A - P) * amount;
+    const slot = editor.frame.objects.findIndex((o) => o.unique_id === args.uid);
+    const shape = editor.geometry.objects.get(slot)?.segments[args.joint_index];
+    if (!shape) throw new Error('geometry unavailable for joint');
+    const bearing = target + shape.bend / 2;
+    const dist = Math.max(1, Number(shape.length) || 1);
+    const x = shape.start.x + dist * Math.cos(bearing);
+    const y = shape.start.y + dist * Math.sin(bearing);
+    editor.select(args.uid, args.joint_index);
+    if (editor.poseJoint(x, y, { snap: false }) === false) throw new Error('pose failed');
+    const after = editor.frame.objects.find((o) => o.unique_id === args.uid)?.angles?.[args.joint_index] ?? P;
+    return { ...base, mode: 'joint', joint_index: args.joint_index, angle_before: round(P), angle_after: round(after), changed: Math.abs(after - P) > 1e-9 };
+  }
+  const A = { x: actionObj.root_x, y: actionObj.root_y };
+  editor.seek(prevTick);
+  const prevObj = editor.frame.objects.find((o) => o.unique_id === args.uid);
+  if (!prevObj) throw new Error(`object ${args.uid} missing on anticipation tick`);
+  const P = { x: prevObj.root_x, y: prevObj.root_y };
+  const tx = P.x - (A.x - P.x) * amount;
+  const ty = P.y - (A.y - P.y) * amount;
+  const moved = await motionPathSet(session, { uid: args.uid, tick: prevTick, x: tx, y: ty });
+  return { ...base, ...moved, mode: 'translation' };
+}
+
 const defineTool = (name, description, schema, handler) => ({ name, description, schema, handler });
 
 const tools = [
@@ -404,6 +461,14 @@ const tools = [
     if (!destroyed) throw new Error(`unknown session_id: ${args.session_id}`);
     return { ok: true, destroyed };
   }),
+  defineTool('add_anticipation', 'Add anticipation to an action: rewrite the pose `lead` ticks before action_tick so it winds up in the opposite direction of the action delta (amount 0..2). One undo group. Omit joint_index to anticipate translation of the whole object.', z.object({
+    session_id: z.string(),
+    uid: z.number().int().positive().describe('unique_id of the object'),
+    action_tick: z.number().int().min(0).describe('Tick where the main action pose lives'),
+    lead: z.number().int().min(1).optional().describe('Ticks before the action to place the anticipation (defaults to 1)'),
+    amount: z.number().min(0).max(2).optional().describe('How far to wind back, as a fraction of the action delta (defaults to 0.5)'),
+    joint_index: z.number().int().min(0).optional().describe('Segment index to anticipate instead of translating the object root'),
+  }), async (args) => addAnticipation(requireSession(args.session_id), args)),
   defineTool('project_new', 'Load a fresh blue stick-figure project (10 named segments, one figure, one keyframe) into the session.', z.object({ session_id: z.string() }), async (args) => projectNew(requireSession(args.session_id))),
   defineTool('scene_report', 'Return a structured snapshot of the current project: figures, segment names/indexes, per-frame object poses, undo/redo state.', z.object({ session_id: z.string() }), async (args) => sceneReport(requireSession(args.session_id))),
   defineTool('pose_joint', 'Pose one joint (IK-aware) to coordinates x,y on the given frame. Returns the resulting joint angle as a receipt.', z.object({

@@ -52,7 +52,7 @@ test('registers the v0.1 tool set', async () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     assert.deepEqual(names, [
-      'keyframe_duplicate', 'motion_path_set', 'pose_joint', 'project_new', 'redo', 'render_animation', 'render_frame', 'run_command', 'save_project',
+      'add_anticipation', 'keyframe_duplicate', 'motion_path_set', 'pose_joint', 'project_new', 'redo', 'render_animation', 'render_frame', 'run_command', 'save_project',
       'scene_report', 'serialize_project', 'session_create', 'session_destroy', 'set_frame_easing', 'undo',
     ]);
   });
@@ -315,6 +315,43 @@ test('render_animation produces a playable animated SVG segment', async () => {
 
     const badRange = await callSafe(client, 'render_animation', { session_id: sid, start_tick: 0, end_tick: 9 });
     assert.ok(badRange.threw || badRange.result?.isError, 'tick range outside timeline is an error');
+
+    await callText(client, 'session_destroy', { session_id: sid });
+  });
+});
+
+test('add_anticipation winds up opposite to the action (translation and joint)', async () => {
+  await withClient(async (client) => {
+    const sid = (await callText(client, 'session_create', {})).data.session_id;
+    await callText(client, 'project_new', { session_id: sid });
+    await callText(client, 'keyframe_duplicate', { session_id: sid });
+    await callText(client, 'keyframe_duplicate', { session_id: sid }); // ticks 0..2
+
+    // Translation: action at tick 2 to the right; anticipation at tick 1 goes left.
+    await callText(client, 'motion_path_set', { session_id: sid, uid: 1, tick: 2, x: 600, y: 280 });
+    const r = (await callText(client, 'add_anticipation', { session_id: sid, uid: 1, action_tick: 2, amount: 0.5 })).data;
+    assert.equal(r.ok, true);
+    assert.equal(r.mode, 'translation');
+    assert.equal(r.anticipation_tick, 1);
+    assert.equal(r.changed, true, `translation anticipation response: ${JSON.stringify(r)}`);
+    let report = (await callText(client, 'scene_report', { session_id: sid })).data;
+    assert.ok(Math.abs(report.frames[1].objects[0].root_x - 420) < 0.01, 'anticipation moved opposite (480 - 60)');
+
+    // Joint: action pose on frame 2, anticipation winds that joint back on frame 1.
+    await callText(client, 'pose_joint', { session_id: sid, frame_index: 2, uid: 1, joint_index: 5, x: 580, y: 180 });
+    const before = (await callText(client, 'scene_report', { session_id: sid })).data.frames[1].objects[0].angles[5];
+    const rj = (await callText(client, 'add_anticipation', { session_id: sid, uid: 1, action_tick: 2, joint_index: 5, amount: 0.5 })).data;
+    assert.equal(rj.mode, 'joint');
+    assert.equal(rj.changed, true);
+    report = (await callText(client, 'scene_report', { session_id: sid })).data;
+    assert.notEqual(report.frames[1].objects[0].angles[5], before, 'joint anticipation changed frame 1');
+    assert.equal(report.frames[2].objects[0].angles[5], (await callText(client, 'scene_report', { session_id: sid })).data.frames[2].objects[0].angles[5]);
+
+    const badAmount = await callSafe(client, 'add_anticipation', { session_id: sid, uid: 1, action_tick: 2, amount: 5 });
+    assert.ok(badAmount.threw || badAmount.result?.isError, 'amount out of range is an error');
+
+    const badTick = await callSafe(client, 'add_anticipation', { session_id: sid, uid: 1, action_tick: 0 });
+    assert.ok(badTick.threw || badTick.result?.isError, 'action_tick must leave room for anticipation');
 
     await callText(client, 'session_destroy', { session_id: sid });
   });
