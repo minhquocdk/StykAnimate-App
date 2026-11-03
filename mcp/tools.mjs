@@ -7,8 +7,11 @@
  *  Created by minhquocdk on 2026-11-03 for the MCP integration effort.
  */
 import { randomUUID } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
+import { resolvePython } from '../scripts/run-python.mjs';
 import { Editor } from '../src/editor.mjs';
 import { defaultFigure, emptyDocument, createFrame, createObject } from '../src/demo.mjs';
 
@@ -236,6 +239,37 @@ async function renderFrame(session, args) {
   return { content };
 }
 
+async function saveProject(session, args) {
+  const { editor } = session;
+  const appRoot = new URL('../', import.meta.url);
+  const dest = new URL(String(args.destination), appRoot);
+  if (!dest.pathname.startsWith(appRoot.pathname)) throw new Error(`destination outside workspace: ${args.destination}`);
+  if (!dest.pathname.toLowerCase().endsWith('.styk')) throw new Error('destination must end with .styk');
+  const python = resolvePython();
+  if (!python) throw new Error('Python 3.11+ not found; set STYK_PYTHON to a python executable (e.g. `uv run python`)');
+  await mkdir(new URL('.', dest), { recursive: true });
+  const tmpDir = new URL('../artifacts/codec-tmp/', import.meta.url);
+  await mkdir(tmpDir, { recursive: true });
+  const id = randomUUID();
+  const reqFile = new URL(`${id}-req.json`, tmpDir);
+  const respFile = new URL(`${id}-resp.json`, tmpDir);
+  try {
+    const request = { operation: 'save', document: editor.serialize(), destination: fileURLToPath(dest) };
+    await writeFile(reqFile, JSON.stringify(request));
+    const spawned = spawnSync(python.command, [...python.args, 'codecs/codec_bridge.py', '--request', fileURLToPath(reqFile), '--response', fileURLToPath(respFile)], {
+      cwd: fileURLToPath(appRoot), encoding: 'utf8', windowsHide: true, timeout: 60000,
+    });
+    const raw = await readFile(respFile, 'utf8').catch(() => null);
+    const response = raw ? JSON.parse(raw) : null;
+    if (!response?.ok) throw new Error(response?.error ?? `codec failed (exit ${spawned.status})`);
+    const size = (await stat(fileURLToPath(dest))).size;
+    return { ok: true, format: response.format, path: response.path, bytes: size };
+  } finally {
+    await unlink(fileURLToPath(reqFile)).catch(() => {});
+    await unlink(fileURLToPath(respFile)).catch(() => {});
+  }
+}
+
 const defineTool = (name, description, schema, handler) => ({ name, description, schema, handler });
 
 const tools = [
@@ -267,6 +301,10 @@ const tools = [
     frame_index: z.number().int().min(0).optional().describe('Frame to render (defaults to the current frame)'),
     output: z.string().optional().describe('Relative path under artifacts/ to also write the SVG (e.g. preview/frame-0.svg)'),
   }), async (args) => renderFrame(requireSession(args.session_id), args)),
+  defineTool('save_project', 'Save the session project as a real .styk file through the native Python codec. Destination must end in .styk and stay inside the repository workspace. Requires Python 3.11+ (set STYK_PYTHON if not on PATH).', z.object({
+    session_id: z.string(),
+    destination: z.string().describe('Relative path from the repo root (e.g. out/anim.styk); must stay inside the workspace'),
+  }), async (args) => saveProject(requireSession(args.session_id), args)),
   defineTool('run_command', 'Escape hatch for arbitrary editor commands. Disabled by default; refuses to run unless STYK_MCP_ALLOW_RUN_COMMAND=1 is set.', z.object({ session_id: z.string(), command: z.string(), args: z.array(z.unknown()).optional() }), async (args) => runCommand(requireSession(args.session_id), args)),
 ];
 

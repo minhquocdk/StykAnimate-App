@@ -10,11 +10,12 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { resolvePython } from '../scripts/run-python.mjs';
 
 const serverEntry = fileURLToPath(new URL('../mcp/server.mjs', import.meta.url));
 
 async function withClient(callback) {
-  const transport = new StdioClientTransport({ command: process.execPath, args: [serverEntry] });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [serverEntry], env: { ...process.env } });
   const client = new Client({ name: 'mcp-server-test', version: '1.0.0' });
   await client.connect(transport);
   try {
@@ -51,7 +52,7 @@ test('registers the v0.1 tool set', async () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     assert.deepEqual(names, [
-      'keyframe_duplicate', 'pose_joint', 'project_new', 'redo', 'render_frame', 'run_command',
+      'keyframe_duplicate', 'pose_joint', 'project_new', 'redo', 'render_frame', 'run_command', 'save_project',
       'scene_report', 'serialize_project', 'session_create', 'session_destroy', 'undo',
     ]);
   });
@@ -188,6 +189,31 @@ test('render_frame returns a viewable SVG preview and writes artifacts safely', 
 
     const refused = await callSafe(client, 'render_frame', { session_id: sid, output: '../outside.svg' });
     assert.ok(refused.threw || refused.result?.isError, 'writing outside artifacts/ is refused');
+
+    await callText(client, 'session_destroy', { session_id: sid });
+  });
+});
+
+test('save_project writes a real .styk through the Python codec', async (t) => {
+  if (!resolvePython()) return t.skip('Python 3.11+ not available; set STYK_PYTHON to run');
+  await withClient(async (client) => {
+    const sid = (await callText(client, 'session_create', {})).data.session_id;
+    await callText(client, 'project_new', { session_id: sid });
+    await callText(client, 'pose_joint', { session_id: sid, uid: 1, joint_index: 5, x: 580, y: 180 });
+
+    const saved = (await callText(client, 'save_project', { session_id: sid, destination: 'artifacts/preview/test.styk' })).data;
+    assert.equal(saved.ok, true, `save_project response: ${JSON.stringify(saved)}`);
+    assert.equal(saved.format, 'styk');
+    assert.ok(saved.path.endsWith('test.styk'));
+    assert.ok(saved.bytes > 0, 'wrote non-empty .styk');
+
+    // Guard: destination outside the workspace is refused.
+    const refused = await callSafe(client, 'save_project', { session_id: sid, destination: '../escape.styk' });
+    assert.ok(refused.threw || refused.result?.isError, 'writing outside workspace is refused');
+
+    // Guard: wrong extension is refused.
+    const badExt = await callSafe(client, 'save_project', { session_id: sid, destination: 'artifacts/preview/test.txt' });
+    assert.ok(badExt.threw || badExt.result?.isError, 'non-.styk destination is refused');
 
     await callText(client, 'session_destroy', { session_id: sid });
   });
