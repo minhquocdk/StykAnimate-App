@@ -177,7 +177,7 @@ const r2 = (value) => Math.round(Number(value) * 100) / 100;
 
 /** Vector preview from the headless geometry: lines become polyline strokes,
  *  circles (head) become filled/stroked circles. Skips images/text/polygons. */
-function sceneToSvg(editor) {
+function frameDrawElements(editor) {
   const doc = editor.serialize();
   const width = Number(doc.canvas_width ?? 960);
   const height = Number(doc.canvas_height ?? 540);
@@ -213,8 +213,67 @@ function sceneToSvg(editor) {
     slot++;
   }
   draws.sort((a, b) => a.z - b.z);
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${draws.map((d) => d.el).join('')}</svg>`;
-  return { svg, width, height, segments: draws.length };
+  return { width, height, elements: draws.map((d) => d.el), segments: draws.length };
+}
+
+function sceneToSvg(editor) {
+  const { width, height, elements, segments } = frameDrawElements(editor);
+  return { svg: `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${elements.join('')}</svg>`, width, height, segments };
+}
+
+const r4 = (value) => Number(value.toFixed(4));
+
+async function renderAnimation(session, args) {
+  const { editor } = session;
+  const total = editor.totalTicks;
+  const start = args.start_tick ?? 0;
+  const end = args.end_tick ?? Math.max(0, total - 1);
+  if (start < 0 || end >= total || start > end) {
+    throw new Error(`tick range ${start}..${end} outside timeline 0..${Math.max(0, total - 1)}`);
+  }
+  const fps = Number(args.fps) || editor.report.fps || 24;
+  const requested = end - start + 1;
+  const step = Math.max(1, Math.ceil(requested / (args.max_frames ?? 96)));
+  const ticks = [];
+  for (let t = start; t <= end; t += step) ticks.push(t);
+  if (ticks.at(-1) !== end) ticks.push(end);
+  const N = ticks.length;
+  let first = null;
+  const frames = [];
+  for (const tick of ticks) {
+    editor.seek(tick);
+    const fr = frameDrawElements(editor);
+    first ??= fr;
+    frames.push({ fr, k0: frames.length / N, k1: (frames.length + 1) / N });
+  }
+  let elements;
+  if (N === 1) {
+    elements = first.elements;
+  } else {
+    const T = N / fps;
+    elements = frames.map(({ fr, k0, k1 }) =>
+      `<g><animate attributeName="opacity" calcMode="discrete" values="0;1;0" keyTimes="0;${r4(k0)};${r4(k1)}" dur="${r4(T)}s" repeatCount="indefinite"/>${fr.elements.join('')}</g>`);
+  }
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${first.width}" height="${first.height}" viewBox="0 0 ${first.width} ${first.height}">${elements.join('')}</svg>`;
+  const summary = {
+    ok: true,
+    format: 'svg-animation',
+    frames: N,
+    fps,
+    duration_seconds: r4(N / fps),
+    start_tick: start,
+    end_tick: end,
+    sampled_ticks: ticks.slice(0, 32),
+    width: first.width,
+    height: first.height,
+  };
+  const content = [{ type: 'text', text: JSON.stringify(summary, null, 2) }];
+  if (args.output) {
+    summary.artifact = await writeArtifact(String(args.output), svg);
+    content[0] = { type: 'text', text: JSON.stringify(summary, null, 2) };
+  }
+  content.push({ type: 'image', data: Buffer.from(svg, 'utf8').toString('base64'), mimeType: 'image/svg+xml' });
+  return { content };
 }
 
 async function writeArtifact(rel, text) {
@@ -372,6 +431,14 @@ const tools = [
     frame_index: z.number().int().min(0).optional().describe('Frame to render (defaults to the current frame)'),
     output: z.string().optional().describe('Relative path under artifacts/ to also write the SVG (e.g. preview/frame-0.svg)'),
   }), async (args) => renderFrame(requireSession(args.session_id), args)),
+  defineTool('render_animation', 'Render a playable animated SVG of the timeline segment [start_tick..end_tick], sampling the real evaluated engine (including easing/inbetweens) at the project fps. Returns an image block plus summary; optionally writes under artifacts/.', z.object({
+    session_id: z.string(),
+    start_tick: z.number().int().min(0).optional().describe('First tick to sample (defaults to 0)'),
+    end_tick: z.number().int().min(0).optional().describe('Last tick to sample (defaults to the last tick)'),
+    fps: z.number().positive().optional().describe('Frames per second for the animation (defaults to project fps)'),
+    max_frames: z.number().int().positive().max(512).optional().describe('Maximum frames to sample (defaults to 96)'),
+    output: z.string().optional().describe('Relative path under artifacts/ to also write the SVG (e.g. preview/anim.svg)'),
+  }), async (args) => renderAnimation(requireSession(args.session_id), args)),
   defineTool('save_project', 'Save the session project as a real .styk file through the native Python codec. Destination must end in .styk and stay inside the repository workspace. Requires Python 3.11+ (set STYK_PYTHON if not on PATH).', z.object({
     session_id: z.string(),
     destination: z.string().describe('Relative path from the repo root (e.g. out/anim.styk); must stay inside the workspace'),

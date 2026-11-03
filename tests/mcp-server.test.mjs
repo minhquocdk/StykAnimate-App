@@ -52,7 +52,7 @@ test('registers the v0.1 tool set', async () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     assert.deepEqual(names, [
-      'keyframe_duplicate', 'motion_path_set', 'pose_joint', 'project_new', 'redo', 'render_frame', 'run_command', 'save_project',
+      'keyframe_duplicate', 'motion_path_set', 'pose_joint', 'project_new', 'redo', 'render_animation', 'render_frame', 'run_command', 'save_project',
       'scene_report', 'serialize_project', 'session_create', 'session_destroy', 'set_frame_easing', 'undo',
     ]);
   });
@@ -283,6 +283,38 @@ test('motion_path_set rewrites a tick pose (translation and joint)', async () =>
 
     const noObj = await callSafe(client, 'motion_path_set', { session_id: sid, uid: 42, tick: 0, x: 1, y: 1 });
     assert.ok(noObj.threw || noObj.result?.isError, 'unknown uid is an error');
+
+    await callText(client, 'session_destroy', { session_id: sid });
+  });
+});
+
+test('render_animation produces a playable animated SVG segment', async () => {
+  await withClient(async (client) => {
+    const sid = (await callText(client, 'session_create', {})).data.session_id;
+    await callText(client, 'project_new', { session_id: sid });
+    await callText(client, 'keyframe_duplicate', { session_id: sid });
+    await callText(client, 'motion_path_set', { session_id: sid, uid: 1, tick: 0, x: 500, y: 280 });
+
+    const res = await client.callTool({ name: 'render_animation', arguments: { session_id: sid, max_frames: 12 } });
+    const summary = JSON.parse(res.content.find((c) => c.type === 'text')?.text ?? '{}');
+    assert.equal(summary.ok, true);
+    assert.equal(summary.format, 'svg-animation');
+    assert.ok(summary.frames >= 2, 'samples multiple ticks');
+    assert.equal(summary.width, 960);
+
+    const image = res.content.find((c) => c.type === 'image');
+    assert.ok(image);
+    assert.equal(image.mimeType, 'image/svg+xml');
+    const svg = Buffer.from(image.data, 'base64').toString('utf8');
+    assert.ok(svg.includes('<animate'), 'animated SVG carries SMIL timing');
+    assert.ok((svg.match(/<polyline/g) ?? []).length > 0, 'animation contains drawn primitives');
+
+    const withFile = await client.callTool({ name: 'render_animation', arguments: { session_id: sid, output: 'preview/anim.svg' } });
+    const fileSummary = JSON.parse(withFile.content.find((c) => c.type === 'text')?.text ?? '{}');
+    assert.equal(fileSummary.artifact, 'artifacts/preview/anim.svg');
+
+    const badRange = await callSafe(client, 'render_animation', { session_id: sid, start_tick: 0, end_tick: 9 });
+    assert.ok(badRange.threw || badRange.result?.isError, 'tick range outside timeline is an error');
 
     await callText(client, 'session_destroy', { session_id: sid });
   });
