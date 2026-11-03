@@ -51,7 +51,7 @@ test('registers the v0.1 tool set', async () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     assert.deepEqual(names, [
-      'keyframe_duplicate', 'pose_joint', 'project_new', 'redo', 'run_command',
+      'keyframe_duplicate', 'pose_joint', 'project_new', 'redo', 'render_frame', 'run_command',
       'scene_report', 'serialize_project', 'session_create', 'session_destroy', 'undo',
     ]);
   });
@@ -156,5 +156,39 @@ test('validates input and isolates sessions', async () => {
 
     await callText(client, 'session_destroy', { session_id: sid });
     await callText(client, 'session_destroy', { session_id: sid2 });
+  });
+});
+
+test('render_frame returns a viewable SVG preview and writes artifacts safely', async () => {
+  await withClient(async (client) => {
+    const sid = (await callText(client, 'session_create', {})).data.session_id;
+    await callText(client, 'project_new', { session_id: sid });
+    await callText(client, 'pose_joint', { session_id: sid, uid: 1, joint_index: 5, x: 580, y: 180 });
+
+    const res = await client.callTool({ name: 'render_frame', arguments: { session_id: sid } });
+    const text = res.content.find((c) => c.type === 'text')?.text ?? '';
+    const summary = JSON.parse(text);
+    assert.equal(summary.ok, true);
+    assert.equal(summary.format, 'svg');
+    assert.equal(summary.width, 960);
+    assert.equal(summary.height, 540);
+    assert.ok(summary.segments > 0, 'frame draws at least one primitive');
+
+    const image = res.content.find((c) => c.type === 'image');
+    assert.ok(image, 'render_frame returns an image content block');
+    assert.equal(image.mimeType, 'image/svg+xml');
+    const svg = Buffer.from(image.data, 'base64').toString('utf8');
+    assert.ok(svg.startsWith('<svg'), 'decoded SVG starts with <svg');
+    assert.ok(svg.includes('<polyline') || svg.includes('<circle'), 'SVG contains drawn primitives');
+
+    // Optional artifact write stays inside artifacts/.
+    const withFile = await client.callTool({ name: 'render_frame', arguments: { session_id: sid, output: 'preview/frame-0.svg' } });
+    const fileSummary = JSON.parse(withFile.content.find((c) => c.type === 'text')?.text ?? '{}');
+    assert.equal(fileSummary.artifact, 'artifacts/preview/frame-0.svg');
+
+    const refused = await callSafe(client, 'render_frame', { session_id: sid, output: '../outside.svg' });
+    assert.ok(refused.threw || refused.result?.isError, 'writing outside artifacts/ is refused');
+
+    await callText(client, 'session_destroy', { session_id: sid });
   });
 });

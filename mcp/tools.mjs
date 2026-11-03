@@ -7,6 +7,7 @@
  *  Created by minhquocdk on 2026-11-03 for the MCP integration effort.
  */
 import { randomUUID } from 'node:crypto';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { z } from 'zod';
 import { Editor } from '../src/editor.mjs';
 import { defaultFigure, emptyDocument, createFrame, createObject } from '../src/demo.mjs';
@@ -167,6 +168,74 @@ function runCommand() {
   throw new Error('run_command is not implemented in v0.1');
 }
 
+const r2 = (value) => Math.round(Number(value) * 100) / 100;
+
+/** Vector preview from the headless geometry: lines become polyline strokes,
+ *  circles (head) become filled/stroked circles. Skips images/text/polygons. */
+function sceneToSvg(editor) {
+  const doc = editor.serialize();
+  const width = Number(doc.canvas_width ?? 960);
+  const height = Number(doc.canvas_height ?? 540);
+  const frame = editor.frame;
+  const order = new Map((frame.object_draw_order_unique_ids ?? []).map((uid, i) => [uid, i]));
+  const draws = [];
+  let slot = 0;
+  for (const [, g] of editor.geometry.objects) {
+    const zBase = (order.get(g.obj?.unique_id) ?? slot) * 1000;
+    for (const s of g.segments) {
+      if (!s || s.seg?.visible === false) continue;
+      const color = s.rgb ? `rgb(${s.rgb[0]},${s.rgb[1]},${s.rgb[2]})` : '#000';
+      const alpha = s.alpha ?? 1;
+      const stroke = alpha < 1 ? `rgba(${s.rgb[0]},${s.rgb[1]},${s.rgb[2]},${r2(alpha)})` : color;
+      const w = Number(s.thickness) || 0;
+      if (s.type === 'line') {
+        if (w <= 0 || !s.points || s.points.length < 2) continue;
+        const pts = s.points.map((p) => `${r2(p.x)},${r2(p.y)}`).join(' ');
+        draws.push({ z: zBase + Number(s.z ?? 0), el: `<polyline points="${pts}" fill="none" stroke="${stroke}" stroke-width="${r2(w)}" stroke-linecap="round" stroke-linejoin="round"/>` });
+      } else if (s.type === 'circle') {
+        const len = Math.abs(Number(s.length) || 0);
+        const filled = s.seg?.segment_kind === 'circleFill' || w >= len;
+        const radius = r2((len + (filled ? w : 0)) / 2);
+        if (!radius) continue;
+        const cx = r2((s.start.x + s.end.x) / 2);
+        const cy = r2((s.start.y + s.end.y) / 2);
+        const el = filled
+          ? `<circle cx="${cx}" cy="${cy}" r="${radius}" fill="${stroke}"/>`
+          : `<circle cx="${cx}" cy="${cy}" r="${radius}" fill="#fff" stroke="${stroke}" stroke-width="${r2(w)}"/>`;
+        draws.push({ z: zBase + Number(s.z ?? 0), el });
+      }
+    }
+    slot++;
+  }
+  draws.sort((a, b) => a.z - b.z);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${draws.map((d) => d.el).join('')}</svg>`;
+  return { svg, width, height, segments: draws.length };
+}
+
+async function writeArtifact(rel, text) {
+  const root = new URL('../artifacts/', import.meta.url);
+  const target = new URL(rel, root);
+  if (!target.pathname.startsWith(root.pathname)) throw new Error(`refusing to write outside artifacts/: ${rel}`);
+  await mkdir(new URL('.', target), { recursive: true });
+  await writeFile(target, text);
+  return `artifacts/${rel.replaceAll('\\', '/')}`;
+}
+
+async function renderFrame(session, args) {
+  const { editor } = session;
+  if (args.frame_index !== undefined) editor.selectFrame(args.frame_index);
+  const { svg, width, height, segments } = sceneToSvg(editor);
+  const summary = { ok: true, format: 'svg', frame_index: editor.frameIndex, width, height, segments };
+  const text = JSON.stringify(summary, null, 2);
+  const content = [{ type: 'text', text }];
+  if (args.output) {
+    summary.artifact = await writeArtifact(String(args.output), svg);
+    content[0] = { type: 'text', text: JSON.stringify(summary, null, 2) };
+  }
+  content.push({ type: 'image', data: Buffer.from(svg, 'utf8').toString('base64'), mimeType: 'image/svg+xml' });
+  return { content };
+}
+
 const defineTool = (name, description, schema, handler) => ({ name, description, schema, handler });
 
 const tools = [
@@ -193,6 +262,11 @@ const tools = [
   defineTool('undo', 'Undo the previous editor command.', z.object({ session_id: z.string() }), async (args) => undo(requireSession(args.session_id))),
   defineTool('redo', 'Redo the last undone editor command.', z.object({ session_id: z.string() }), async (args) => redo(requireSession(args.session_id))),
   defineTool('serialize_project', 'Return the full serialized project document.', z.object({ session_id: z.string() }), async (args) => serializeProject(requireSession(args.session_id))),
+  defineTool('render_frame', 'Render the current (or given) frame to an SVG vector preview so the AI can visually verify poses. Returns an image content block plus a text summary; optionally writes the SVG under artifacts/.', z.object({
+    session_id: z.string(),
+    frame_index: z.number().int().min(0).optional().describe('Frame to render (defaults to the current frame)'),
+    output: z.string().optional().describe('Relative path under artifacts/ to also write the SVG (e.g. preview/frame-0.svg)'),
+  }), async (args) => renderFrame(requireSession(args.session_id), args)),
   defineTool('run_command', 'Escape hatch for arbitrary editor commands. Disabled by default; refuses to run unless STYK_MCP_ALLOW_RUN_COMMAND=1 is set.', z.object({ session_id: z.string(), command: z.string(), args: z.array(z.unknown()).optional() }), async (args) => runCommand(requireSession(args.session_id), args)),
 ];
 
@@ -201,6 +275,7 @@ export function registerTools(server) {
     server.registerTool(tool.name, { description: tool.description, inputSchema: tool.schema }, async (args) => {
       try {
         const payload = await tool.handler(args);
+        if (payload && Array.isArray(payload.content)) return { content: payload.content };
         return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
       } catch (error) {
         return { content: [{ type: 'text', text: `Error: ${error.message}` }], isError: true };
