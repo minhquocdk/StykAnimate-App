@@ -292,6 +292,47 @@ async function setFrameEasing(session, args) {
   };
 }
 
+async function motionPathSet(session, args) {
+  const { editor } = session;
+  const holder = editor.report.keyframes.find((frame) => frame.objects.some((o) => o.unique_id === args.uid));
+  if (!holder) throw new Error(`no object with unique_id ${args.uid}`);
+  const object = holder.objects.find((o) => o.unique_id === args.uid);
+  const figure = editor.report.figure_types.find((f) => f.figure_type_id === object.figure_type_id);
+  if (!figure) throw new Error(`figure type ${object.figure_type_id} not found`);
+  let target;
+  if (args.joint_index != null) {
+    if (!Number.isInteger(args.joint_index) || args.joint_index < 0 || args.joint_index >= figure.segments.length) {
+      throw new Error(`joint_index ${args.joint_index} out of range 0..${figure.segments.length - 1}`);
+    }
+    const segment = figure.segments[args.joint_index];
+    target = { kind: 'node', uid: args.uid, joint: args.joint_index, handleId: segment.segment_id };
+  } else {
+    target = { kind: 'node', uid: args.uid, handleId: 0 }; // translate the whole connected component
+  }
+  if (!editor.beginMotionPathEdit(target, args.tick)) {
+    throw new Error('begin motion path failed (tick outside timeline or invalid target)');
+  }
+  try {
+    if (editor.updateMotionPathEdit({ x: args.x, y: args.y }) === false) throw new Error('update motion path failed');
+    const committed = editor.commitMotionPathEdit() !== false;
+    return {
+      ok: true,
+      uid: args.uid,
+      tick: args.tick,
+      x: args.x,
+      y: args.y,
+      joint_index: args.joint_index ?? null,
+      mode: args.joint_index != null ? 'joint' : 'translation',
+      changed: committed,
+      frame_index: editor.frameIndex,
+      frame_count: editor.report.keyframes.length,
+    };
+  } catch (error) {
+    editor.cancelMotionPathEdit();
+    throw error;
+  }
+}
+
 const defineTool = (name, description, schema, handler) => ({ name, description, schema, handler });
 
 const tools = [
@@ -315,6 +356,14 @@ const tools = [
     y: z.number().describe('Target y in document coordinates'),
   }), async (args) => poseJoint(requireSession(args.session_id), args)),
   defineTool('keyframe_duplicate', 'Duplicate a keyframe (defaults to the current frame) as one undo group.', z.object({ session_id: z.string(), frame_index: z.number().int().min(0).optional() }), async (args) => keyframeDuplicate(requireSession(args.session_id), args)),
+  defineTool('motion_path_set', 'Move an object (translation) or pose one of its joints at a specific timeline tick, rewriting that point of its motion path. One undo group. Omit joint_index to translate the whole connected component.', z.object({
+    session_id: z.string(),
+    uid: z.number().int().positive().describe('unique_id of the object to move'),
+    tick: z.number().int().min(0).describe('Timeline tick whose motion-path point to rewrite (0-based)'),
+    x: z.number().describe('Destination x in document coordinates'),
+    y: z.number().describe('Destination y in document coordinates'),
+    joint_index: z.number().int().min(0).optional().describe('Segment index to pose instead of translating the object root'),
+  }), async (args) => motionPathSet(requireSession(args.session_id), args)),
   defineTool('undo', 'Undo the previous editor command.', z.object({ session_id: z.string() }), async (args) => undo(requireSession(args.session_id))),
   defineTool('redo', 'Redo the last undone editor command.', z.object({ session_id: z.string() }), async (args) => redo(requireSession(args.session_id))),
   defineTool('serialize_project', 'Return the full serialized project document.', z.object({ session_id: z.string() }), async (args) => serializeProject(requireSession(args.session_id))),

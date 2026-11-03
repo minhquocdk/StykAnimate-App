@@ -52,7 +52,7 @@ test('registers the v0.1 tool set', async () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     assert.deepEqual(names, [
-      'keyframe_duplicate', 'pose_joint', 'project_new', 'redo', 'render_frame', 'run_command', 'save_project',
+      'keyframe_duplicate', 'motion_path_set', 'pose_joint', 'project_new', 'redo', 'render_frame', 'run_command', 'save_project',
       'scene_report', 'serialize_project', 'session_create', 'session_destroy', 'set_frame_easing', 'undo',
     ]);
   });
@@ -248,6 +248,41 @@ test('set_frame_easing controls keyframe timing and is undoable', async () => {
     assert.equal(undone.applied, true);
     report = (await callText(client, 'scene_report', { session_id: sid })).data;
     assert.equal(report.frames[0].easing.interpolation, 'linear', 'undo reverts the bezier change');
+
+    await callText(client, 'session_destroy', { session_id: sid });
+  });
+});
+
+test('motion_path_set rewrites a tick pose (translation and joint)', async () => {
+  await withClient(async (client) => {
+    const sid = (await callText(client, 'session_create', {})).data.session_id;
+    await callText(client, 'project_new', { session_id: sid });
+    await callText(client, 'keyframe_duplicate', { session_id: sid });
+
+    let report = (await callText(client, 'scene_report', { session_id: sid })).data;
+    assert.equal(report.frame_count, 2);
+    const initialRoot = report.frames[0].objects[0].root_x;
+
+    let r = (await callText(client, 'motion_path_set', { session_id: sid, uid: 1, tick: 0, x: 500, y: 280 })).data;
+    assert.equal(r.ok, true);
+    assert.equal(r.mode, 'translation');
+    assert.equal(r.changed, true);
+    report = (await callText(client, 'scene_report', { session_id: sid })).data;
+    assert.equal(report.frames[0].objects[0].root_x, 500, 'tick 0 root moved');
+    assert.equal(report.frames[1].objects[0].root_x, initialRoot, 'other frame untouched');
+
+    const beforeAngle = report.frames[1].objects[0].angles[5];
+    r = (await callText(client, 'motion_path_set', { session_id: sid, uid: 1, tick: 1, joint_index: 5, x: 560, y: 200 })).data;
+    assert.equal(r.mode, 'joint');
+    assert.equal(r.changed, true);
+    report = (await callText(client, 'scene_report', { session_id: sid })).data;
+    assert.notEqual(report.frames[1].objects[0].angles[5], beforeAngle, 'tick 1 joint posed');
+
+    const badTick = await callSafe(client, 'motion_path_set', { session_id: sid, uid: 1, tick: 99, x: 1, y: 1 });
+    assert.ok(badTick.threw || badTick.result?.isError, 'tick outside timeline is an error');
+
+    const noObj = await callSafe(client, 'motion_path_set', { session_id: sid, uid: 42, tick: 0, x: 1, y: 1 });
+    assert.ok(noObj.threw || noObj.result?.isError, 'unknown uid is an error');
 
     await callText(client, 'session_destroy', { session_id: sid });
   });
